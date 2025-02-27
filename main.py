@@ -108,6 +108,8 @@ refine_template = PromptTemplate(
 - 箇条書きの使用
 - [UPDATED]タグの残存
 - 情報の重複記載
+- ちょまど, おだしょーは文字起こしツールの不具合です。無視してください。
+- 参加者名が不明である場合には、Aさん、Bさんのように伏せ字で表記してください。
 """,
     input_variables=["text", "existing_answer"],
 )
