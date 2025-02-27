@@ -11,8 +11,9 @@ import assemblyai as aai
 from dotenv import load_dotenv
 from langchain.chains.summarize import load_summarize_chain
 from langchain.docstore.document import Document
-from langchain.text_splitter import RecursiveCharacterTextSplitter, SpacyTextSplitter
+from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_anthropic import ChatAnthropic
+from langchain_core.prompts import PromptTemplate
 from pydantic import BaseModel, Field
 
 # Configure logging
@@ -38,38 +39,106 @@ AUDIO_DIR = os.getenv("AUDIO_DIR", "audio_files")
 OUTPUT_DIR = os.getenv("OUTPUT_DIR", "output_files")
 TRANSCRIPTS_DIR = f"{OUTPUT_DIR}/transcripts"
 SUMMARIES_DIR = f"{OUTPUT_DIR}/summaries"
+FINAL_DIR = f"{OUTPUT_DIR}/final_minutes"
 
 # Supported audio file extensions
 SUPPORTED_EXTENSIONS = {".mp3", ".mp4", ".wav", ".m4a", ".flac", ".aac", ".ogg"}
 
 # prompt
-initial_template = """以下の会話記録から正式な議事録を作成してください。以下の要素を含めて下さい：
-1. 会議日時：[自動挿入]
-2. 参加者：[役職・名前]
-3. 決定事項（箇条書き）
-4. 保留課題
-5. 次回予定
+initial_template = PromptTemplate(
+    template="""以下の会話記録から正式な議事録を作成してください。以下の要素を含めて下さい：
+
+**基本情報**
+- 会議日時：[自動挿入]
+- 参加者：[役職・名前]
+- 開催形式：対面/オンライン
+
+**議題トピック**
+{{
+  "トピック1": {{
+    "決定事項": [],
+    "議論内容": [],
+    "数値データ": [],
+    "アクションアイテム": []
+  }},
+  ...
+}}
+
+**形式要件**
+1. Markdown形式で3階層見出しを使用
+2. です・ます調で統一
+3. 専門用語は原語維持
+4. 数値データは時系列表形式
+5. トピック間の関連性を明示
 
 会話内容：
 {text}
 
-出力形式：
-・Markdownを使用
-・敬体（です・ます調）で統一
-・専門用語は原語維持
-・数値データは表形式で整理"""
+出力例：
+### 基本情報
+- **日時**: 2023年10月15日 14:00-16:00
+- **参加者**: 山田部長、佐藤課長、鈴木主任
+- **開催形式**: オンライン会議
 
-refine_template = """既存の議事録を以下の新規内容で更新してください：
+### プロジェクト進捗
+#### 開発状況
+現在の進捗率は75%で、前回比10%向上...
+""",
+    input_variables=["text"],
+)
+
+# 更新用プロンプト
+refine_template = PromptTemplate(
+    template="""既存の議事録を以下の新規内容で更新してください：
+
+**現行議事録**
 {existing_answer}
 
-新規会話内容：
+**新規会話内容**
 {text}
 
-更新ルール：
-1. 重複情報は除外
-2. 数値データは累積計算
-3. 決定事項は時系列順に整理
-4. 変更点を[UPDATED]タグで明示"""
+**更新ルール**
+1. トピックマッピング：新規内容を既存トピックに分類
+2. 情報統合：数値データは時系列表を更新
+3. 変更追跡：更新箇所に[REV]マークを付与
+4. 矛盾解消：相反する情報は最新を優先
+5. トピック関連性：新規トピックには関連トピックを明記
+
+**禁止事項**
+- 箇条書きの使用
+- [UPDATED]タグの残存
+- 情報の重複記載
+""",
+    input_variables=["text", "existing_answer"],
+)
+
+# ファイナライズ用プロンプト
+final_template = PromptTemplate(
+    template="""議事録を最終整形してください：
+
+**入力文書**
+{text}
+
+**整形要件**
+1. [REV]マークを除去し自然な文章に変換
+2. トピック間の論理構造を再編成
+3. 数値データの集計表を最新化
+4. 専門用語一貫性チェック
+5. 文書全体の要約を先頭に追加
+
+**出力形式**
+- 見出し構造：# → ## → ###
+- 表形式：時系列データは横軸を日付
+- 強調表示：数値変化5%以上を太字
+- 関連性表示：トピック間リンクを脚注
+
+**禁止事項**
+- 箇条書き
+- 未定義の略語
+- 主観的表現
+""",
+    input_variables=["text"],
+)
 
 
 def normalize_text(text):
@@ -86,10 +155,11 @@ class ProcessedFile(BaseModel):
     original_path: str
     transcript_path: Optional[str] = None
     summary_path: Optional[str] = None
+    final_path: Optional[str] = None
     processed_date: datetime = Field(default_factory=datetime.now)
     file_size: int
     duration_seconds: Optional[float] = None
-    status: str = "pending"  # pending, transcribed, summarized, error
+    status: str = "pending"  # pending, transcribed, summarized, finalized, error
     error_message: Optional[str] = None
 
 
@@ -105,7 +175,7 @@ class MinutesCreator:
 
     def _setup_directories(self) -> None:
         """Create necessary directories if they don't exist."""
-        for directory in [AUDIO_DIR, OUTPUT_DIR, TRANSCRIPTS_DIR, SUMMARIES_DIR]:
+        for directory in [AUDIO_DIR, OUTPUT_DIR, TRANSCRIPTS_DIR, SUMMARIES_DIR, FINAL_DIR]:
             os.makedirs(directory, exist_ok=True)
             logger.info(f"Ensured directory exists: {directory}")
 
@@ -172,12 +242,67 @@ class MinutesCreator:
         processed_paths = {
             Path(info.original_path)
             for info in self.processed_files.values()
-            if info.status in ["transcribed", "summarized"]
+            if info.status in ["transcribed", "summarized", "finalized"]
         }
 
         unprocessed = [f for f in all_files if f not in processed_paths]
         logger.info(f"Found {len(unprocessed)} unprocessed audio files")
         return unprocessed
+
+    def get_summaries_to_finalize(self) -> List[str]:
+        """Get a list of summaries that need to be finalized."""
+        summaries_to_finalize = [
+            info.summary_path
+            for info in self.processed_files.values()
+            if info.status == "summarized" and info.summary_path is not None
+        ]
+
+        logger.info(f"Found {len(summaries_to_finalize)} summaries to finalize")
+        return summaries_to_finalize
+
+    def finalize_summary(self, summary_path: str) -> Optional[str]:
+        """Finalize a summary using the final template."""
+        try:
+            logger.info(f"Finalizing summary: {summary_path}")
+
+            # Find the corresponding file record
+            file_id = next((k for k, v in self.processed_files.items() if v.summary_path == summary_path), None)
+
+            if not file_id:
+                logger.warning(f"No record found for summary {summary_path}")
+                return None
+
+            # Read the summary
+            with open(summary_path, "r", encoding="utf-8") as f:
+                summary_text = f.read()
+
+            # Create a prompt with the final template
+            prompt = final_template.format(text=summary_text)
+
+            # Generate the finalized minutes
+            finalized_text = self.llm.invoke(prompt).content
+
+            # Save the finalized minutes
+            summary_path_obj = Path(summary_path)
+            final_path = Path(FINAL_DIR) / f"{summary_path_obj.stem.replace('_summary', '')}_final.md"
+            with open(final_path, "w", encoding="utf-8") as f:
+                f.write(finalized_text)
+
+            # Update the record
+            self.processed_files[file_id].final_path = str(final_path)
+            self.processed_files[file_id].status = "finalized"
+            self._save_processed_files()
+
+            logger.info(f"Finalization completed and saved to {final_path}")
+            return str(final_path)
+
+        except Exception as e:
+            logger.error(f"Error finalizing {summary_path}: {e}")
+            if file_id:
+                self.processed_files[file_id].status = "error"
+                self.processed_files[file_id].error_message = str(e)
+                self._save_processed_files()
+            return None
 
     def transcribe_file(self, file_path: Path) -> Optional[str]:
         """Transcribe an audio file using AssemblyAI with speaker diarization and Japanese language."""
@@ -221,7 +346,9 @@ class MinutesCreator:
             diarization_path = Path(TRANSCRIPTS_DIR) / f"{file_path.stem}_diarization.txt"
             speaker_transcript = []
             for utterance in transcript.utterances:
-                speaker_transcript.append(f"Speaker {utterance.speaker}: {utterance.text}")
+                # 余分な空白を削除する
+                text = utterance.text.replace(" ", "")
+                speaker_transcript.append(f"Speaker {utterance.speaker}: {text}")
 
             with open(diarization_path, "w", encoding="utf-8") as f:
                 f.write("\n".join(speaker_transcript))
@@ -267,15 +394,12 @@ class MinutesCreator:
 
             # Split the text into chunks for processing
             text_splitter = RecursiveCharacterTextSplitter(
-                chunk_size=3000,  # 日本語の平均文長を考慮
+                chunk_size=8000,  # 日本語の平均文長を考慮
                 chunk_overlap=500,  # 文脈継続のため増加
-                separators=["\n\n", "。", "、", " "],  # 日本語の句読点を優先
+                separators=["\n\n", "\n"],  # 日本語の句読点を優先
+                # separators=["\n\n", "\n", "。", "、", " "],  # 日本語の句読点を優先
                 length_function=len,
                 is_separator_regex=False,
-            )
-
-            text_splitter = SpacyTextSplitter(
-                chunk_size=3000, pipeline="ja_core_news_sm", separators=["。", "？", "！", "\n\n"]
             )
 
             docs = [Document(page_content=chunk) for chunk in text_splitter.split_text(transcript_text)]
@@ -315,34 +439,48 @@ class MinutesCreator:
             return None
 
     def process_all_files(self) -> None:
-        """Process all unprocessed audio files."""
-        # Scan for audio files
+        """Process all unprocessed audio files and finalize summaries."""
+        # Step 1: Process new audio files
         all_files = self.scan_audio_files()
         unprocessed_files = self.get_unprocessed_files(all_files)
 
-        if not unprocessed_files:
+        if unprocessed_files:
+            logger.info(f"Processing {len(unprocessed_files)} new audio files")
+            # Process each file
+            for file_path in unprocessed_files:
+                logger.info(f"Processing file: {file_path}")
+
+                # Transcribe
+                transcript_path = self.transcribe_file(file_path)
+                if not transcript_path:
+                    logger.warning(f"Skipping summarization for {file_path} due to transcription failure")
+                    continue
+
+                # Summarize
+                summary_path = self.summarize_transcript(transcript_path)
+                if not summary_path:
+                    logger.warning(f"Summarization failed for {transcript_path}")
+                    continue
+
+                logger.info(f"Successfully processed {file_path}")
+        else:
             logger.info("No new files to process")
-            return
 
-        # Process each file
-        for file_path in unprocessed_files:
-            logger.info(f"Processing file: {file_path}")
+        # Step 2: Finalize summaries that need it
+        summaries_to_finalize = self.get_summaries_to_finalize()
+        if summaries_to_finalize:
+            logger.info(f"Finalizing {len(summaries_to_finalize)} summaries")
+            for summary_path in summaries_to_finalize:
+                final_path = self.finalize_summary(summary_path)
+                if not final_path:
+                    logger.warning(f"Finalization failed for {summary_path}")
+                    continue
 
-            # Transcribe
-            transcript_path = self.transcribe_file(file_path)
-            if not transcript_path:
-                logger.warning(f"Skipping summarization for {file_path} due to transcription failure")
-                continue
+                logger.info(f"Successfully finalized {summary_path} to {final_path}")
+        else:
+            logger.info("No summaries to finalize")
 
-            # Summarize
-            summary_path = self.summarize_transcript(transcript_path)
-            if not summary_path:
-                logger.warning(f"Summarization failed for {transcript_path}")
-                continue
-
-            logger.info(f"Successfully processed {file_path}")
-
-        logger.info("Finished processing all files")
+        logger.info("Finished processing all files and finalizing summaries")
 
 
 def main():
