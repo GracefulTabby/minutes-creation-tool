@@ -25,7 +25,8 @@
                 "redhat.vscode-yaml",
                 "shardulm94.trailing-spaces",
                 "tamasfe.even-better-toml",
-                "yzhang.markdown-all-in-one"
+                "yzhang.markdown-all-in-one",
+                "saoudrizwan.claude-dev"
             ]
         }
     },
@@ -36,6 +37,6 @@
         "UV_PROJECT_ENVIRONMENT": "/home/vscode/.venv"
     },
     "postCreateCommand": "uv sync --frozen",
-    "postStartCommand": "uv run pre-commit install",
+    // "postStartCommand": "uv run pre-commit install",
     "remoteUser": "vscode"
 }

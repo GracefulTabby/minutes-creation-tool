@@ -1,7 +1,16 @@
 [project]
 name = "minutes-creation-tool"
 version = "0.1.0"
-description = "Add your description here"
+description = "Tool for creating AI meeting minutes using transcription and summarization"
 readme = "README.md"
 requires-python = ">=3.13"
-dependencies = []
+dependencies = [
+    "assemblyai",
+    "langchain",
+    "langchain-openai",
+    "langchain-anthropic",
+    "anthropic",
+    "python-dotenv",
+    "pydantic",
+    "transformers>=4.49.0",
+]
