@@ -196,6 +196,7 @@ class MinutesCreator:
         self.llm = ChatAnthropic(
             temperature=0,
             model_name="claude-3-7-sonnet-20250219",
+            max_tokens_to_sample=4000,
             api_key=ANTHROPIC_API_KEY,
         )
         logger.info("Anthropic Claude 3 Sonnet client initialized")
@@ -396,10 +397,9 @@ class MinutesCreator:
 
             # Split the text into chunks for processing
             text_splitter = RecursiveCharacterTextSplitter(
-                chunk_size=8000,  # 日本語の平均文長を考慮
+                chunk_size=4000,  # 日本語の平均文長を考慮
                 chunk_overlap=500,  # 文脈継続のため増加
-                separators=["\n\n", "\n"],  # 日本語の句読点を優先
-                # separators=["\n\n", "\n", "。", "、", " "],  # 日本語の句読点を優先
+                separators=["\n\n", "\n", "。", "、", " "],  # 日本語の句読点を優先
                 length_function=len,
                 is_separator_regex=False,
             )
